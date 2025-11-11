@@ -264,6 +264,7 @@ class ServerArgs:
     hybrid_kvcache_ratio: Optional[float] = None
     swa_full_tokens_ratio: float = 0.8
     disable_hybrid_swa_memory: bool = False
+    enable_unified_swa_memory_pool: bool = False
     radix_eviction_policy: str = "lru"
 
     # Runtime options
@@ -2127,6 +2128,11 @@ class ServerArgs:
             "--disable-hybrid-swa-memory",
             action="store_true",
             help="Disable the hybrid SWA memory pool.",
+        )
+        parser.add_argument(
+            "--enable-unified-swa-memory-pool",
+            action="store_true",
+            help="Enable the unified SWA memory pool.",
         )
         parser.add_argument(
             "--radix-eviction-policy",

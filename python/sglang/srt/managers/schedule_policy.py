@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 import torch
 
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
-from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator, UnifiedSWATokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.mamba_radix_cache import MambaRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
@@ -358,6 +358,11 @@ class PrefillAdder:
         self.is_hybrid = isinstance(
             self.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
         )
+        self.is_hybrid_unified = isinstance(
+            self.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator
+        )
+        if self.is_hybrid_unified:
+            self.is_hybrid = True
         self.is_hybrid_gdn_cache = isinstance(self.tree_cache, MambaRadixCache)
 
         self.priority_scheduling_preemption_threshold = (
@@ -375,7 +380,12 @@ class PrefillAdder:
 
     @property
     def rem_total_tokens(self):
-        if self.is_hybrid:
+        if self.is_hybrid_unified:
+            available_and_evictable = min(
+                self.token_to_kv_pool_allocator.available_size()
+                + self.tree_cache.evictable_size()
+            )
+        elif self.is_hybrid:
             available_and_evictable = min(
                 self.token_to_kv_pool_allocator.full_available_size()
                 + self.tree_cache.full_evictable_size(),
@@ -397,7 +407,12 @@ class PrefillAdder:
 
     @property
     def cur_rem_tokens(self):
-        if self.is_hybrid:
+        if self.is_hybrid_unified:
+            available_and_evictable = min(
+                self.token_to_kv_pool_allocator.available_size()
+                + self.tree_cache.evictable_size()
+            )
+        elif self.is_hybrid:
             available_and_evictable = min(
                 self.token_to_kv_pool_allocator.full_available_size()
                 + self.tree_cache.full_evictable_size(),

@@ -23,11 +23,11 @@ import heapq
 import time
 from collections import defaultdict
 from functools import partial
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
-from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator, UnifiedSWATokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import (
@@ -324,13 +324,15 @@ class SWARadixCache(BasePrefixCache):
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: SWATokenToKVPoolAllocator,
+        token_to_kv_pool_allocator: Union[SWATokenToKVPoolAllocator, UnifiedSWATokenToKVPoolAllocator],
         sliding_window_size: int,
         page_size: int,
         disable: bool = False,
         is_eagle: bool = False,
     ):
-        assert isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator)
+        assert isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator) or isinstance(
+            token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator
+        )
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.page_size = page_size
@@ -662,6 +664,13 @@ class SWARadixCache(BasePrefixCache):
 
                 x = x_next
 
+    def evict_unified(self, num_tokens: int) -> None:
+        if self.disable:
+            return
+        real_need_tokens = num_tokens * self.token_to_kv_pool_allocator.group_size
+        evicted_tokens = 0
+        
+
     def inc_lock_ref(self, node: TreeNode) -> Optional[int]:
         """
         Increment the lock reference count for the node. Returns the swa_uuid_for_lock, which needs
@@ -744,9 +753,9 @@ class SWARadixCache(BasePrefixCache):
         self.full_lru_list.sanity_check(self)
         self.swa_lru_list.sanity_check(self)
 
-    def evictable_size(self) -> Tuple[int, int]:
-        # Note: use full_evictable_size() and swa_evictable_size() instead.
-        raise NotImplementedError
+    def evictable_size(self) -> int:
+        assert isinstance(self.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator)
+        return (self.full_evictable_size_ + self.swa_evictable_size_ * self.token_to_kv_pool_allocator.swa_ratio) // self.token_to_kv_pool_allocator.group_size
 
     def full_evictable_size(self) -> int:
         return self.full_evictable_size_

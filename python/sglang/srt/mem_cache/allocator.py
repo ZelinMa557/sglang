@@ -26,7 +26,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.mem_cache.memory_pool import SWAKVPool
+from sglang.srt.mem_cache.memory_pool import SWAKVPool, UnifiedSWAKVPool
 from sglang.srt.utils import get_bool_env_var, get_num_new_pages, next_power_of_2
 
 if TYPE_CHECKING:
@@ -291,6 +291,116 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.is_not_in_free_group = True
         self.free_group = []
 
+class UnifiedSWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
+    """Allocator for Unified SWA hybrid KV cache."""
+
+    def __init__(
+        self,
+        size: int,
+        swa_ratio: int,
+        dtype: torch.dtype,
+        device: str,
+        kvcache: UnifiedSWAKVPool,
+        need_sort: bool,
+    ):
+        super().__init__(size, 1, dtype, device, kvcache, need_sort)
+        assert isinstance(kvcache, UnifiedSWAKVPool)
+        self._size = size
+        self.base_allocator = TokenToKVPoolAllocator(
+            size,
+            dtype,
+            device,
+            kvcache.full_kv_pool,
+            need_sort,
+        )
+        self.full_to_swa_index_mapping = [torch.empty(
+            size,
+            dtype=torch.int64,
+            device=device,
+        ) for _ in range(swa_ratio)]
+        self.clear()
+        self.swa_ratio = swa_ratio
+        self.group_size = swa_ratio + 1
+        self._kvcache.full_to_swa_index_mapping = self.full_to_swa_index_mapping
+
+        self.full_used_size = 0
+        self.swa_used_size = 0
+
+    def available_size(self):
+        return self.base_allocator.available_size() // self.group_size
+    @property
+    def size(self):
+        return self._size
+
+    def debug_print(self) -> str:
+        msg = ""
+        msg += f"#total-available-size: {self.base_allocator.available_size()}, "
+        msg += (
+            f"#full-attn-used-size: {self.full_used_size}, "
+        )
+        msg += (
+            f"#swa-attn-used-size: {self.swa_used_size * self.swa_ratio}, "
+        )
+        return msg
+
+    def get_kvcache(self):
+        return self._kvcache
+
+    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id):
+        return self._kvcache.translate_loc_from_full_to_swa(kv_indices, layer_id)
+    
+    def is_swa_layer(self, layer_id):
+        return self._kvcache.is_swa_layer(layer_id)
+
+    def alloc(self, need_size: int):
+        if self.group_size * need_size > self.base_allocator.available_size():
+            return None
+
+        alloc_full_indices = self.base_allocator.alloc(need_size)
+        alloc_swa_indices = self.base_allocator.alloc(self.swa_ratio * need_size)
+        for i in range(self.swa_ratio):
+            self.full_to_swa_index_mapping[i][alloc_full_indices] = alloc_swa_indices[i * need_size : (i + 1) * need_size]
+        self.full_used_size += alloc_full_indices.numel()
+        self.swa_used_size += alloc_swa_indices.numel()
+        return alloc_full_indices
+
+    def free(self, free_index: torch.Tensor):
+        if free_index.numel() == 0:
+            return
+        if self.is_not_in_free_group:
+            self.base_allocator.free(free_index)
+            self.free_swa(free_index)
+        else:
+            self.free_group.append(free_index)
+        assert (
+            self.base_allocator.available_size() <= self.base_allocator.size
+        )
+        self.full_used_size -= free_index.numel()
+
+    def free_swa(self, free_index: torch.Tensor):
+        for i in range(self.swa_ratio):
+            swa_indices = self.full_to_swa_index_mapping[i][free_index]
+            swa_indices = swa_indices[swa_indices > 0]
+            self.base_allocator.free(swa_indices)
+            self.full_to_swa_index_mapping[i][free_index] = 0
+        self.swa_used_size -= free_index.numel()
+
+    def backup_state(self):
+        return [
+            self.base_allocator.backup_state(),
+        ]
+
+    def restore_state(self, state):
+        assert len(state) == 1
+        self.base_allocator.restore_state(state[0])
+
+    def clear(self):
+        self.base_allocator.clear()
+        self.full_to_swa_index_mapping.fill_(0)
+        self.is_not_in_free_group = True
+        self.free_group = []
+        self.full_used_size = 0
+        self.swa_used_size = 0
 
 @triton.jit
 def alloc_extend_kernel(

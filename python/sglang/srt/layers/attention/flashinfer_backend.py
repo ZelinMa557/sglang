@@ -21,7 +21,7 @@ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
-from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator, UnifiedSWATokenToKVPoolAllocator
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.speculative.spec_info import SpecInput
 from sglang.srt.utils import (
@@ -143,9 +143,11 @@ class FlashInferAttnBackend(AttentionBackend):
             model_runner.sliding_window_size is not None
             and model_runner.model_config.is_encoder_decoder
         ), "Sliding window and cross attention are not supported together"
-
+        self.is_hybrid_unified = isinstance(model_runner.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator)
         if model_runner.sliding_window_size is not None:
             self.num_wrappers = 2
+            if self.is_hybrid_unified:
+                self.num_wrappers = model_runner.token_to_kv_pool_allocator.group_size
             self.dispatch_reason = WrapperDispatch.SLIDING_WINDOW
         elif model_runner.model_config.is_encoder_decoder:
             self.num_wrappers = 2
@@ -834,6 +836,8 @@ class FlashInferAttnBackend(AttentionBackend):
             return 0
 
         if self.dispatch_reason == WrapperDispatch.SLIDING_WINDOW:
+            if self.is_hybrid_unified:
+                return layer.layer_id % self.num_wrappers
             return layer.sliding_window_size == -1
         if self.dispatch_reason == WrapperDispatch.CROSS_ATTENTION:
             return layer.is_cross_attention
@@ -870,6 +874,10 @@ class FlashInferIndicesUpdaterDecode:
         else:
             assert self.attn_backend.num_wrappers == 1
             self.update = self.update_single_wrapper
+        
+        self.is_hybrid_unified = isinstance(
+            model_runner.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator
+        )
 
     def update(
         self,
@@ -924,9 +932,15 @@ class FlashInferIndicesUpdaterDecode:
         fixed_split_size: Optional[int] = None,
         disable_split_kv: Optional[bool] = None,
     ):
-        assert self.sliding_window_size is not None
-        for wrapper_id in range(2):
-            if wrapper_id == 0:
+        is_swa_allocator = isinstance(
+                self.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
+            ) or isinstance(self.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator)
+        for wrapper_id in range(self.attn_backend.num_wrappers):
+            use_sliding_window_kv_pool = False
+            is_sliding_window_wrapper = wrapper_id == 0
+            if self.is_hybrid_unified:
+                is_sliding_window_wrapper = self.token_to_kv_pool_allocator.is_sliding_window(wrapper_id)
+            if is_sliding_window_wrapper:
                 # Sliding window attention
                 paged_kernel_lens_tmp = torch.clamp(
                     seq_lens, max=self.sliding_window_size + 1
@@ -939,16 +953,13 @@ class FlashInferIndicesUpdaterDecode:
                 else:
                     paged_kernel_lens_sum_tmp = paged_kernel_lens_tmp.sum().item()
                 kv_start_idx_tmp = seq_lens - paged_kernel_lens_tmp
+                use_sliding_window_kv_pool = is_swa_allocator
             else:
                 # Full attention
                 paged_kernel_lens_tmp = seq_lens
                 paged_kernel_lens_sum_tmp = seq_lens_sum
                 seq_lens_cpu_tmp = seq_lens_cpu
                 kv_start_idx_tmp = None
-
-            use_sliding_window_kv_pool = wrapper_id == 0 and isinstance(
-                self.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
-            )
 
             self.call_begin_forward(
                 decode_wrappers[wrapper_id],
@@ -1009,6 +1020,7 @@ class FlashInferIndicesUpdaterDecode:
         use_sliding_window_kv_pool: bool = False,
         fixed_split_size: Optional[int] = None,
         disable_split_kv: Optional[bool] = None,
+        wrapper_id: Optional[int] = None,
     ):
         if spec_info is None:
             bs = len(req_pool_indices)
@@ -1038,11 +1050,18 @@ class FlashInferIndicesUpdaterDecode:
 
         if use_sliding_window_kv_pool:
             kv_last_index = kv_indptr[-1]
-            kv_indices[:kv_last_index] = (
-                self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
-                    kv_indices[:kv_last_index]
+            if self.is_hybrid_unified:
+                kv_indices[:kv_last_index] = (
+                    self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                        kv_indices[:kv_last_index], wrapper_id
+                    )
                 )
-            )
+            else:
+                kv_indices[:kv_last_index] = (
+                    self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                        kv_indices[:kv_last_index]
+                    )
+                )
 
         global global_override_indptr_cpu
         locally_override = False
@@ -1133,6 +1152,9 @@ class FlashInferIndicesUpdaterPrefill:
             assert self.attn_backend.num_wrappers == 1
             self.update = self.update_single_wrapper
 
+        self.is_hybrid_unified = isinstance(
+            model_runner.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator
+        )
     def update(
         self,
         req_pool_indices: torch.Tensor,
@@ -1203,23 +1225,28 @@ class FlashInferIndicesUpdaterPrefill:
         fixed_split_size: Optional[int] = None,
         multi_item_params: Optional[MultiItemScoringParams] = None,
     ):
-        for wrapper_id in range(2):
-            if wrapper_id == 0:
+        is_swa_allocator = isinstance(
+                self.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
+            ) or isinstance(self.token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator)
+        for wrapper_id in range(self.attn_backend.num_wrappers):
+            use_sliding_window_kv_pool = False
+            is_sliding_window_wrapper = wrapper_id == 0
+            if self.is_hybrid_unified:
+                is_sliding_window_wrapper = self.token_to_kv_pool_allocator.is_sliding_window(wrapper_id)
+            if is_sliding_window_wrapper:
                 # window attention use paged only
                 paged_kernel_lens = torch.minimum(
                     seq_lens,
                     torch.tensor(self.sliding_window_size) + seq_lens - prefix_lens,
                 )
                 paged_kernel_lens_sum = paged_kernel_lens.sum().item()
+                use_sliding_window_kv_pool = is_swa_allocator
             else:
                 # full attention
                 paged_kernel_lens = seq_lens
                 paged_kernel_lens_sum = seq_lens_sum
 
             kv_start_idx = seq_lens - paged_kernel_lens
-            use_sliding_window_kv_pool = wrapper_id == 0 and isinstance(
-                self.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
-            )
 
             self.call_begin_forward(
                 self.prefill_wrapper_ragged,
@@ -1236,6 +1263,7 @@ class FlashInferIndicesUpdaterPrefill:
                 spec_info,
                 use_sliding_window_kv_pool=use_sliding_window_kv_pool,
                 multi_item_params=multi_item_params,
+                wrapper_id=wrapper_id,
             )
 
     def update_cross_attention(
@@ -1297,6 +1325,7 @@ class FlashInferIndicesUpdaterPrefill:
         use_sliding_window_kv_pool: bool = False,
         fixed_split_size: Optional[int] = None,
         multi_item_params: Optional[MultiItemScoringParams] = None,
+        wrapper_id: Optional[int] = None,
     ):
         bs = len(seq_lens)
         if spec_info is None:
@@ -1345,11 +1374,18 @@ class FlashInferIndicesUpdaterPrefill:
 
         if use_sliding_window_kv_pool:
             kv_last_index = kv_indptr[-1]
-            kv_indices[:kv_last_index] = (
-                self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
-                    kv_indices[:kv_last_index]
+            if self.is_hybrid_unified:
+                kv_indices[:kv_last_index] = (
+                    self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                        kv_indices[:kv_last_index], wrapper_id
+                    )
                 )
-            )
+            else:
+                kv_indices[:kv_last_index] = (
+                    self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                        kv_indices[:kv_last_index]
+                    )
+                )
 
         # cached part
         # Conditionally set multi-item parameters

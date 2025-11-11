@@ -59,6 +59,7 @@ from sglang.srt.environ import envs
 from sglang.srt.mem_cache.allocator import (
     BaseTokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
+    UnifiedSWATokenToKVPoolAllocator
 )
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.chunk_cache import SWAChunkCache
@@ -969,6 +970,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator = None
     tree_cache: BasePrefixCache = None
     is_hybrid: bool = False
+    is_hybrid_unified: bool = False
 
     # Batch configs
     model_config: ModelConfig = None
@@ -1087,6 +1089,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return_logprob = any(req.return_logprob for req in reqs)
 
         is_hybrid = False
+        is_hybrid_unified = False
         if isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
             assert (
                 tree_cache is None
@@ -1094,6 +1097,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 or isinstance(tree_cache, SWAChunkCache)
             ), "SWARadixCache or SWAChunkCache is required for SWATokenToKVPoolAllocator"
             is_hybrid = True
+        elif isinstance(token_to_kv_pool_allocator, UnifiedSWATokenToKVPoolAllocator):
+            assert (
+                tree_cache is None
+                or isinstance(tree_cache, SWARadixCache)
+            ), "SWARadixCache is required for UnifiedSWATokenToKVPoolAllocator"
+            is_hybrid = True
+            is_hybrid_unified = True
 
         return cls(
             reqs=reqs,
@@ -1101,6 +1111,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
             tree_cache=tree_cache,
             is_hybrid=is_hybrid,
+            is_hybrid_unified=is_hybrid_unified,
             model_config=model_config,
             enable_overlap=enable_overlap,
             return_logprob=return_logprob,
@@ -1472,7 +1483,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         ):
             if len(sorted_indices) == 1:
                 # Corner case: only one request left
-                if self.is_hybrid:
+                if self.is_hybrid_unified:
+                    assert (
+                        self.token_to_kv_pool_allocator.available_size() > 0
+                    ), f"No space left for only one request, {self.token_to_kv_pool_allocator.available_size()=}"
+                elif self.is_hybrid:
                     full_available_size = (
                         self.token_to_kv_pool_allocator.full_available_size()
                     )
@@ -1829,7 +1844,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )
 
     def _is_available_size_sufficient(self, num_tokens: int) -> bool:
-        if self.is_hybrid:
+        if self.is_hybrid_unified:
+            return self.token_to_kv_pool_allocator.available_size() >= num_tokens
+        elif self.is_hybrid:
             return (
                 self.token_to_kv_pool_allocator.full_available_size() >= num_tokens
                 and self.token_to_kv_pool_allocator.swa_available_size() >= num_tokens

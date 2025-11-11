@@ -88,6 +88,7 @@ from sglang.srt.mem_cache.allocator import (
     BaseTokenToKVPoolAllocator,
     PagedTokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
+    UnifiedSWATokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
 )
 from sglang.srt.mem_cache.allocator_ascend import AscendPagedTokenToKVPoolAllocator
@@ -102,6 +103,7 @@ from sglang.srt.mem_cache.memory_pool import (
     NSATokenToKVPool,
     ReqToTokenPool,
     SWAKVPool,
+    UnifiedSWAKVPool,
 )
 from sglang.srt.model_executor.cpu_graph_runner import CPUGraphRunner
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
@@ -274,6 +276,7 @@ class ModelRunner:
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.is_hybrid = model_config.is_hybrid
+        self.is_hybrid_unified = server_args.enable_unified_swa_memory_pool
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
         self.forward_pass_id = 0
@@ -1577,7 +1580,7 @@ class ModelRunner:
             self.max_total_num_tokens = tensor.item()
 
         # create token size for hybrid cache
-        if self.is_hybrid:
+        if self.is_hybrid and not self.is_hybrid_unified:
             self.set_num_token_hybrid()
 
         if self.max_total_num_tokens <= 0:
@@ -1644,6 +1647,9 @@ class ModelRunner:
         else:
             # Draft worker shares req_to_token_pool with the target worker.
             assert self.is_draft_worker
+        
+        if self.is_hybrid_unified:
+            swa_ratio = self.model_config.full_attention_layer_ids[1] - self.model_config.full_attention_layer_ids[0]
 
         # Initialize token_to_kv_pool
         is_nsa_model = is_deepseek_nsa(self.model_config.hf_config)
@@ -1720,7 +1726,22 @@ class ModelRunner:
                 end_layer=self.end_layer,
             )
         else:
-            if self.is_hybrid:
+            if self.is_hybrid_unified:
+                self.token_to_kv_pool = UnifiedSWAKVPool(
+                    size=self.max_total_num_tokens,
+                    dtype=self.kv_cache_dtype,
+                    head_num=self.model_config.get_num_kv_heads(
+                        get_attention_tp_size()
+                    ),
+                    head_dim=self.model_config.head_dim,
+                    layer_num=self.num_effective_layers,
+                    swa_ratio=swa_ratio,
+                    swa_attention_layer_ids=self.model_config.swa_attention_layer_ids,
+                    full_attention_layer_ids=self.model_config.full_attention_layer_ids,
+                    enable_kvcache_transpose=False,
+                    device=self.device,
+                )
+            elif self.is_hybrid:
                 self.token_to_kv_pool = SWAKVPool(
                     size=self.full_max_total_num_tokens,
                     size_swa=self.swa_max_total_num_tokens,
@@ -1787,6 +1808,15 @@ class ModelRunner:
                 )
             else:
                 if self.page_size == 1:
+                    if self.is_hybrid_unified:
+                        self.token_to_kv_pool_allocator = UnifiedSWATokenToKVPoolAllocator(
+                            self.max_total_num_tokens,
+                            swa_ratio=swa_ratio,
+                            dtype=self.kv_cache_dtype,
+                            device=self.device,
+                            kvcache=self.token_to_kv_pool,
+                            need_sort=need_sort,
+                        )
                     if self.is_hybrid:
                         self.token_to_kv_pool_allocator = SWATokenToKVPoolAllocator(
                             self.full_max_total_num_tokens,

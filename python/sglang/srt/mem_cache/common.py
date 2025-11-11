@@ -232,8 +232,11 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
 
     allocator = tree_cache.token_to_kv_pool_allocator
 
-    # Check if this is a hybrid allocator
-    if hasattr(allocator, "full_available_size"):
+    # Check if this is a unified hybrid allocator
+    if hasattr(allocator, "swa_ratio"):
+        if allocator.available_size() < num_tokens:
+            tree_cache.evict_unified(num_tokens)
+    elif hasattr(allocator, "full_available_size"):
         # Hybrid allocator
         full_available_size = allocator.full_available_size()
         swa_available_size = allocator.swa_available_size()

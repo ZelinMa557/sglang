@@ -1057,6 +1057,133 @@ class SWAKVPool(KVCache):
                 layer_id_override=layer_id_pool,
             )
 
+class UnifiedSWAKVPool(KVCache):
+    """KV cache with unified pool for interleaved full and SWA attention layers."""
+
+    def __init__(
+        self,
+        size: int,
+        dtype: torch.dtype,
+        head_num: int,
+        head_dim: int,
+        swa_ratio: int,
+        swa_attention_layer_ids: List[int],
+        full_attention_layer_ids: List[int],
+        enable_kvcache_transpose: bool,
+        device: str,
+        token_to_kv_pool_class: KVCache = MHATokenToKVPool,
+        **kwargs,
+    ):
+        self.size = size
+        self.dtype = dtype
+        self.head_num = head_num
+        self.head_dim = head_dim
+        self.device = device
+        self.swa_layer_nums = len(swa_attention_layer_ids)
+        self.full_layer_nums = len(full_attention_layer_ids)
+        # assert self.swa_layer_nums == self.full_layer_nums
+        # # ensure that swa layers are followed by full layers
+        # for swa_layer_id in swa_attention_layer_ids:
+        #     assert swa_layer_id + 1 in full_attention_layer_ids, "UnifiedSWAKVPool requires swa layers to be followed by full layers"
+        self.start_layer = 0
+        self.page_size = 1
+
+        kwargs["page_size"] = 1
+        kwargs["enable_memory_saver"] = False
+        kwargs["head_num"] = head_num
+        kwargs["head_dim"] = head_dim
+        kwargs["device"] = device
+        # TODO MHATransposedTokenToKVPool if enable_kvcache_transpose is True
+        assert not enable_kvcache_transpose
+
+        # for disagg with nvlink
+        self.enable_custom_mem_pool = get_bool_env_var(
+            "SGLANG_MOONCAKE_CUSTOM_MEM_POOL", "false"
+        )
+        if self.enable_custom_mem_pool:
+            # TODO(shangming): abstract custom allocator class for more backends
+            from mooncake.allocator import NVLinkAllocator
+
+            allocator = NVLinkAllocator.get_allocator(self.device)
+            self.custom_mem_pool = torch.cuda.MemPool(allocator.allocator())
+        else:
+            self.custom_mem_pool = None
+
+        self.base_kv_pool = token_to_kv_pool_class(
+            size=size,
+            dtype=dtype,
+            layer_num=self.full_layer_nums,
+            **kwargs,
+        )
+        self.swa_ratio = swa_ratio
+        self.group_size = self.swa_ratio + 1
+        self.layers_mapping: Dict[int, Tuple[int, bool]] = {}
+        for full_attn_layer_id in full_attention_layer_ids:
+            self.layers_mapping[full_attn_layer_id] = (full_attn_layer_id // self.group_size, False)
+        for swa_attn_layer_id in swa_attention_layer_ids:
+            self.layers_mapping[swa_attn_layer_id] = (swa_attn_layer_id // self.group_size, True)
+        self.full_to_swa_index_mapping: Optional[List[torch.Tensor]] = None
+
+        _, self.full_attn_first = self.layers_mapping[0]
+
+        k_size, v_size = self.base_kv_pool.get_kv_size_bytes()
+        self.mem_usage = (k_size + v_size) / GB
+        logger.info(
+            f"SWAKVPool mem usage: {self.mem_usage} GB, swa size: {self.size_swa}, full size: {self.size}"
+        )
+
+    def get_contiguous_buf_infos(self):
+        raise NotImplementedError()
+
+    def get_state_buf_infos(self):
+        raise NotImplementedError()
+
+    def get_key_buffer(self, layer_id: int):
+        base_layer_id, _ = self.layers_mapping[layer_id]
+        return self.base_kv_pool.get_key_buffer(base_layer_id)
+
+    def get_value_buffer(self, layer_id: int):
+        base_layer_id, _ = self.layers_mapping[layer_id]
+        return self.base_kv_pool.get_value_buffer(base_layer_id)
+
+    def get_kv_buffer(self, layer_id: int):
+        base_layer_id, _ = self.layers_mapping[layer_id]
+        return self.base_kv_pool.get_kv_buffer(base_layer_id)
+
+    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id):
+        assert self.full_to_swa_index_mapping is not None
+        group_offset = layer_id % self.group_size
+        swa_offset = group_offset + 1 if self.full_attn_first else group_offset
+        return self.full_to_swa_index_mapping[swa_offset][kv_indices].to(torch.int32)
+
+    def is_swa_layer(self, layer_id):
+        _, is_swa = self.layers_mapping[layer_id]
+        return is_swa
+
+    def set_kv_buffer(
+        self,
+        layer: RadixAttention,
+        loc: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+    ):
+
+        layer_id = layer.layer_id
+        base_layer_id, is_swa = self.layers_mapping[layer_id]
+        if is_swa:
+            if self.full_to_swa_index_mapping is not None:
+                loc = self.translate_loc_from_full_to_swa(loc, layer_id)
+        self.base_kv_pool.set_kv_buffer(
+            None,
+            loc,
+            cache_k,
+            cache_v,
+            k_scale,
+            v_scale,
+            layer_id_override=base_layer_id,
+        )
 
 class AscendTokenToKVPool(MHATokenToKVPool):
 
