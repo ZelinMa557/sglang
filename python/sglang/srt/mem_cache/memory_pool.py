@@ -1129,7 +1129,7 @@ class UnifiedSWAKVPool(KVCache):
         k_size, v_size = self.base_kv_pool.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
         logger.info(
-            f"SWAKVPool mem usage: {self.mem_usage} GB, swa size: {self.size_swa}, full size: {self.size}"
+            f"SWAKVPool mem usage: {self.mem_usage} GB, swa size: {self.swa_ratio}, full size: {self.size}"
         )
 
     def get_contiguous_buf_infos(self):

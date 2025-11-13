@@ -1421,7 +1421,9 @@ class ModelRunner:
                     swa_attention_layer_ids.append(layer.layer_id)
             self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
             self.model_config.full_attention_layer_ids = full_attention_layer_ids
-
+            logger.info(
+                f"Hybrid model. swa_attention_layer_ids={swa_attention_layer_ids}, full_attention_layer_ids={full_attention_layer_ids}"
+            )
             # Algorithm:
             # Existing max_total_num_tokens is per layer and assume all layers have the same number of tokens.
             # - Find total # of tokens available across layers.
@@ -1430,11 +1432,13 @@ class ModelRunner:
                 self.max_total_num_tokens * self.model_config.num_hidden_layers
             )
             if self.is_hybrid_unified:
-                swa_ratio = full_attention_layer_ids[1] - full_attention_layer_ids[0]
+                swa_ratio = full_attention_layer_ids[1] - full_attention_layer_ids[0] -1
                 self.max_total_num_tokens = total_tokens // (swa_ratio + 1)
                 logger.info(
                     f"Use Hybrid Unified memory pool. swa_ratio={swa_ratio}, max_total_tokens={self.max_total_num_tokens}"
                 )
+                return
+
             full_layers_num = len(full_attention_layer_ids)
             swa_layers_num = len(swa_attention_layer_ids)
             swa_full_tokens_ratio = self.server_args.swa_full_tokens_ratio
@@ -1655,7 +1659,7 @@ class ModelRunner:
             assert self.is_draft_worker
         
         if self.is_hybrid_unified:
-            swa_ratio = self.model_config.full_attention_layer_ids[1] - self.model_config.full_attention_layer_ids[0]
+            swa_ratio = self.model_config.full_attention_layer_ids[1] - self.model_config.full_attention_layer_ids[0] -1
 
         # Initialize token_to_kv_pool
         is_nsa_model = is_deepseek_nsa(self.model_config.hf_config)
