@@ -310,7 +310,7 @@ class UnifiedSWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             size,
             dtype,
             device,
-            kvcache.full_kv_pool,
+            kvcache.base_kv_pool,
             need_sort,
         )
         self.full_to_swa_index_mapping = [torch.empty(
@@ -393,7 +393,8 @@ class UnifiedSWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def clear(self):
         self.base_allocator.clear()
-        self.full_to_swa_index_mapping.fill_(0)
+        for full_to_swa_index_mapping in self.full_to_swa_index_mapping:
+            full_to_swa_index_mapping.fill_(0)
         self.is_not_in_free_group = True
         self.free_group = []
         self.full_used_size = 0

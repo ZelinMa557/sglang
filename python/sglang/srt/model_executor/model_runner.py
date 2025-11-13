@@ -1826,7 +1826,7 @@ class ModelRunner:
                             kvcache=self.token_to_kv_pool,
                             need_sort=need_sort,
                         )
-                    if self.is_hybrid:
+                    elif self.is_hybrid:
                         self.token_to_kv_pool_allocator = SWATokenToKVPoolAllocator(
                             self.full_max_total_num_tokens,
                             self.swa_max_total_num_tokens,

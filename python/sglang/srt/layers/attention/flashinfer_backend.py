@@ -939,7 +939,7 @@ class FlashInferIndicesUpdaterDecode:
             use_sliding_window_kv_pool = False
             is_sliding_window_wrapper = wrapper_id == 0
             if self.is_hybrid_unified:
-                is_sliding_window_wrapper = self.token_to_kv_pool_allocator.is_sliding_window(wrapper_id)
+                is_sliding_window_wrapper = self.token_to_kv_pool_allocator.is_swa_layer(wrapper_id)
             if is_sliding_window_wrapper:
                 # Sliding window attention
                 paged_kernel_lens_tmp = torch.clamp(
@@ -971,6 +971,7 @@ class FlashInferIndicesUpdaterDecode:
                 spec_info,
                 seq_lens_cpu=seq_lens_cpu_tmp,
                 use_sliding_window_kv_pool=use_sliding_window_kv_pool,
+                wrapper_id=wrapper_id,
             )
 
     def update_cross_attention(

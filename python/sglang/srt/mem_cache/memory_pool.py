@@ -1124,7 +1124,7 @@ class UnifiedSWAKVPool(KVCache):
             self.layers_mapping[swa_attn_layer_id] = (swa_attn_layer_id // self.group_size, True)
         self.full_to_swa_index_mapping: Optional[List[torch.Tensor]] = None
 
-        _, self.full_attn_first = self.layers_mapping[0]
+        _, self.swa_first = self.layers_mapping[0]
 
         k_size, v_size = self.base_kv_pool.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
@@ -1153,7 +1153,7 @@ class UnifiedSWAKVPool(KVCache):
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id):
         assert self.full_to_swa_index_mapping is not None
         group_offset = layer_id % self.group_size
-        swa_offset = group_offset + 1 if self.full_attn_first else group_offset
+        swa_offset = group_offset if self.swa_first else group_offset + 1
         return self.full_to_swa_index_mapping[swa_offset][kv_indices].to(torch.int32)
 
     def is_swa_layer(self, layer_id):
