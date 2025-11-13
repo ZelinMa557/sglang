@@ -328,9 +328,6 @@ class UnifiedSWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def available_size(self):
         return self.base_allocator.available_size() // self.group_size
-    @property
-    def size(self):
-        return self._size
 
     def debug_print(self) -> str:
         msg = ""

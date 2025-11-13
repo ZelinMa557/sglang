@@ -1433,7 +1433,7 @@ class ModelRunner:
             )
             if self.is_hybrid_unified:
                 swa_ratio = full_attention_layer_ids[1] - full_attention_layer_ids[0] -1
-                self.max_total_num_tokens = total_tokens // (swa_ratio + 1)
+                self.max_total_num_tokens = total_tokens // len(full_attention_layer_ids)
                 logger.info(
                     f"Use Hybrid Unified memory pool. swa_ratio={swa_ratio}, max_total_tokens={self.max_total_num_tokens}"
                 )
