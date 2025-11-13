@@ -1580,7 +1580,7 @@ class ModelRunner:
             self.max_total_num_tokens = tensor.item()
 
         # create token size for hybrid cache
-        if self.is_hybrid and not self.is_hybrid_unified:
+        if self.is_hybrid:
             self.set_num_token_hybrid()
 
         if self.max_total_num_tokens <= 0:
