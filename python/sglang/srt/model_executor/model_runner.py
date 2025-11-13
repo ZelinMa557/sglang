@@ -1429,6 +1429,12 @@ class ModelRunner:
             total_tokens = (
                 self.max_total_num_tokens * self.model_config.num_hidden_layers
             )
+            if self.is_hybrid_unified:
+                swa_ratio = full_attention_layer_ids[1] - full_attention_layer_ids[0]
+                self.max_total_num_tokens = total_tokens // (swa_ratio + 1)
+                logger.info(
+                    f"Use Hybrid Unified memory pool. swa_ratio={swa_ratio}, max_total_tokens={self.max_total_num_tokens}"
+                )
             full_layers_num = len(full_attention_layer_ids)
             swa_layers_num = len(swa_attention_layer_ids)
             swa_full_tokens_ratio = self.server_args.swa_full_tokens_ratio
@@ -1734,7 +1740,6 @@ class ModelRunner:
                         get_attention_tp_size()
                     ),
                     head_dim=self.model_config.head_dim,
-                    layer_num=self.num_effective_layers,
                     swa_ratio=swa_ratio,
                     swa_attention_layer_ids=self.model_config.swa_attention_layer_ids,
                     full_attention_layer_ids=self.model_config.full_attention_layer_ids,
