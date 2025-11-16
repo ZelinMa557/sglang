@@ -1150,8 +1150,12 @@ class UnifiedSWAKVPool(KVCache):
         base_layer_id, _ = self.layers_mapping[layer_id]
         return self.base_kv_pool.get_kv_buffer(base_layer_id)
 
-    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id):
+    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id: Optional[int] = None):
         assert self.full_to_swa_index_mapping is not None
+        # interleaved swa and full layers
+        if layer_id is None:
+            assert len(self.full_to_swa_index_mapping) == 1
+            return self.full_to_swa_index_mapping[0][kv_indices].to(torch.int32)
         group_offset = layer_id % self.group_size
         swa_offset = group_offset if self.swa_first else group_offset + 1
         return self.full_to_swa_index_mapping[swa_offset][kv_indices].to(torch.int32)

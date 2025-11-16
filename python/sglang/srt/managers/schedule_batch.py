@@ -1102,7 +1102,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 tree_cache is None
                 or isinstance(tree_cache, SWARadixCache)
             ), "SWARadixCache is required for UnifiedSWATokenToKVPoolAllocator"
-            is_hybrid = True
             is_hybrid_unified = True
 
         return cls(

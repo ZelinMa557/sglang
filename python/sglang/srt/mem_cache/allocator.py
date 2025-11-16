@@ -20,7 +20,7 @@ Page-aligned memory pool.
 """
 
 import abc
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 import torch
 import triton
@@ -343,7 +343,7 @@ class UnifiedSWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     def get_kvcache(self):
         return self._kvcache
 
-    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id):
+    def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor, layer_id: Optional[int] = None):
         return self._kvcache.translate_loc_from_full_to_swa(kv_indices, layer_id)
     
     def is_swa_layer(self, layer_id):
